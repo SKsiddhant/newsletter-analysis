@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.streamlit/
+trial_run.py
+test_gemini.py
+list_models.py
+full_ocr_context.txt
+extract_specialized.py
+node_modules/
+server/
+client/
+package.json
+package-lock.json
+tsconfig.json
