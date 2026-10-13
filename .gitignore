@@ -13,3 +13,6 @@ client/
 package.json
 package-lock.json
 tsconfig.json
+
+# Local sample newsletters (third-party content, large)
+/*.pdf
