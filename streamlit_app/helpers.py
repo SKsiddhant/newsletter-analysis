@@ -39,6 +39,21 @@ def validate_public_url(url):
     return parsed.geturl()
 
 
+def fetch_public(url, get, max_redirects=5, **kwargs):
+    """GET `url` with `get` (requests.get), re-validating every redirect hop.
+    requests follows redirects on its own, so a public URL that 302s to http://169.254.169.254/ would
+    otherwise slip past validate_public_url(). Raises ValueError on a bad hop or too many redirects."""
+    from urllib.parse import urljoin
+    url = validate_public_url(url)
+    for _ in range(max_redirects + 1):
+        response = get(url, allow_redirects=False, **kwargs)
+        location = response.headers.get("Location") if 300 <= response.status_code < 400 else None
+        if not location:
+            return response
+        url = validate_public_url(urljoin(url, location))
+    raise ValueError("Too many redirects.")
+
+
 def parse_analysis(content):
     """Extract the JSON object from a model reply, or raise ValueError."""
     match = re.search(r"\{.*\}", content or "", re.DOTALL)

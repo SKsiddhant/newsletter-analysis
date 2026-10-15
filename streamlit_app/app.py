@@ -6,7 +6,7 @@ from pypdf import PdfReader
 import os
 from dotenv import load_dotenv
 
-from helpers import clip, esc, news_query, parse_analysis, safe_link, validate_public_url
+from helpers import clip, esc, fetch_public, news_query, parse_analysis, safe_link, validate_public_url
 
 # Load environment variables
 load_dotenv()
@@ -66,8 +66,7 @@ def extract_text_from_pdf(file):
 def extract_text_from_url(url):
     # Cached: Streamlit re-runs this script on every click, which used to re-download the page each time.
     try:
-        url = validate_public_url(url)
-        response = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (BizPulse Analyst)"})
+        response = fetch_public(url, requests.get, timeout=10, headers={"User-Agent": "Mozilla/5.0 (BizPulse Analyst)"})
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         paragraphs = soup.find_all('p')
