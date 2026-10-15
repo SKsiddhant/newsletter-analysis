@@ -2,12 +2,11 @@ import streamlit as st
 import google.generativeai as genai
 import requests
 from bs4 import BeautifulSoup
-import PyPDF2
-import json
+from pypdf import PdfReader
 import os
 from dotenv import load_dotenv
-from datetime import datetime
-import io
+
+from helpers import clip, esc, fetch_public, news_query, parse_analysis, safe_link, validate_public_url
 
 # Load environment variables
 load_dotenv()
@@ -52,22 +51,31 @@ def check_api_keys():
 # --- Utility Functions ---
 
 def extract_text_from_pdf(file):
-    pdf_reader = PyPDF2.PdfReader(file)
-    text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text()
+    try:
+        pdf_reader = PdfReader(file)
+        text = "\n".join((page.extract_text() or "") for page in pdf_reader.pages)  # extract_text() can return None
+    except Exception as e:
+        st.error(f"Could not read that PDF: {e}")
+        return None
+    if not text.strip():
+        st.warning("No text could be extracted from this PDF (it may be a scanned image).")
+        return None
     return text
 
+@st.cache_data(ttl=600, show_spinner=False)
 def extract_text_from_url(url):
+    # Cached: Streamlit re-runs this script on every click, which used to re-download the page each time.
     try:
-        response = requests.get(url, timeout=10)
+        response = fetch_public(url, requests.get, timeout=10, headers={"User-Agent": "Mozilla/5.0 (BizPulse Analyst)"})
+        response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         paragraphs = soup.find_all('p')
         text = "\n".join([p.get_text() for p in paragraphs])
+        if not text.strip():
+            raise ValueError("No article text found on that page.")
         return text
     except Exception as e:
-        st.error(f"Error fetching URL: {e}")
-        return None
+        return f"__ERROR__{e}"
 
 def analyze_news(text):
     if not st.session_state.GEMINI_API_KEY:
@@ -113,14 +121,10 @@ def analyze_news(text):
     try:
         response = model.generate_content(prompt)
         content = response.text.strip()
-        
-        # Robust JSON extraction
-        import re
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-        else:
-            st.error("Could not find JSON in AI response.")
+        try:
+            return parse_analysis(content)
+        except ValueError as e:
+            st.error(str(e))
             st.code(content)
             return None
     except Exception as e:
@@ -132,17 +136,26 @@ def fetch_related_news(keywords):
         st.sidebar.info("ℹ️ NewsAPI Key missing. External news fetching disabled.")
         return []
     
-    query = " OR ".join(keywords)
-    url = f"https://newsapi.org/v2/everything?q={query}&sortBy=relevancy&pageSize=5&apiKey={st.session_state.NEWS_API_KEY}&language=en"
-    
+    query = news_query(keywords)
+    if not query:
+        return []
+
     try:
-        response = requests.get(url)
+        # The key goes in a header and the query in params: with the key in the URL, any logged
+        # exception (requests includes the URL in its messages) leaked it, and keywords were not URL-encoded.
+        response = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={"q": query, "sortBy": "relevancy", "pageSize": 5, "language": "en"},
+            headers={"X-Api-Key": st.session_state.NEWS_API_KEY},
+            timeout=10,
+        )
         data = response.json()
         if data.get("status") == "ok":
             return data.get("articles", [])
+        st.sidebar.warning(f"NewsAPI: {data.get('message', 'request failed')}")
         return []
     except Exception as e:
-        print(f"NewsAPI error: {e}")
+        st.sidebar.warning(f"NewsAPI request failed ({type(e).__name__}).")
         return []
 
 # --- Streamlit UI ---
@@ -220,13 +233,16 @@ with st.container():
             if url:
                 with st.spinner("Extracting text..."):
                     input_data = extract_text_from_url(url)
+                if input_data and input_data.startswith("__ERROR__"):
+                    st.error(f"Error fetching URL: {input_data[len('__ERROR__'):]}")
+                    input_data = None
         else:
             uploaded_file = st.file_uploader("Upload PDF or TXT file:", type=["pdf", "txt"])
             if uploaded_file:
                 if uploaded_file.type == "application/pdf":
                     input_data = extract_text_from_pdf(uploaded_file)
                 else:
-                    input_data = uploaded_file.read().decode("utf-8")
+                    input_data = uploaded_file.read().decode("utf-8", errors="replace")
 
     with col2:
         st.info("💡 **Tips:**\n- Paste a whole newsletter for a full industry breakdown.\n- Use URLs from sites like Bloomberg or TechCrunch.\n- Upload complex PDF reports for deep analysis.")
@@ -235,87 +251,90 @@ with st.container():
                 st.warning("Please provide some input first!")
             else:
                 st.session_state.analysis_requested = True
-                st.session_state.input_text = input_data
+                st.session_state.input_text, truncated = clip(input_data)
+                if truncated:
+                    st.warning("The text is very long; only the first 100,000 characters will be analysed.")
 
 # Results Section
-if keys_ready and "analysis_requested" in st.session_state and st.session_state.analysis_requested:
+if keys_ready and st.session_state.get("analysis_requested"):
+    st.session_state.analysis_requested = False
     with st.spinner("Our AI is scanning the markets..."):
-        result = analyze_news(st.session_state.input_text)
-        
-        if result:
-            st.divider()
-            
-            # Importance Score
-            score = result['importanceScore']
-            score_class = "high" if score >= 8 else "med" if score >= 5 else "low"
-            st.markdown(f'<div class="importance-badge {score_class}">Importance Score: {score}/10</div>', unsafe_allow_html=True)
-            
-            # Summary & Highlights
-            col_a, col_b = st.columns(2)
-            
-            with col_a:
-                st.markdown("### 📝 Executive Summary")
-                st.write(result['summary'])
-                
-                st.markdown("### 🚀 Market Impact")
-                st.write(result['marketImpact'])
-                
-            with col_b:
-                st.markdown("### ✨ Key Highlights")
-                for highlight in result['keyHighlights']:
-                    st.markdown(f"- {highlight}")
-                
-                st.markdown("### 🏗️ Builders & Industries")
-                html_tags = "".join([f'<span class="tag">{tag}</span>' for tag in result['buildersAndIndustries']])
-                st.markdown(html_tags, unsafe_allow_html=True)
+        # Kept in session_state: results used to vanish on the next widget interaction.
+        st.session_state.result = analyze_news(st.session_state.input_text)
 
-            # Specialized Design & Real Estate Section
-            if 'designAndRealEstateIntel' in result:
-                st.divider()
-                st.markdown("### 🏠 Design & Real Estate Intelligence")
-                
-                d_col1, d_col2, d_col3 = st.columns(3)
-                
-                with d_col1:
-                    st.markdown("#### 🎯 Opportunities")
-                    for opp in result['designAndRealEstateIntel'].get('opportunities', []):
-                        st.markdown(f"- {opp}")
-                
-                with d_col2:
-                    st.markdown("#### 📈 Industry Trends")
-                    for trend in result['designAndRealEstateIntel'].get('trends', []):
-                        st.markdown(f"- {trend}")
-                        
-                with d_col3:
-                    st.markdown("#### 🏗️ Key Projects")
-                    for proj in result['designAndRealEstateIntel'].get('keyProjects', []):
-                        st.markdown(f"- {proj}")
-
-            # Related Market Intel
-            st.divider()
-            st.header("🌐 Related Market Intel")
-            st.caption("Latest and relevant news from around the web")
-            
-            with st.spinner("Fetching global market data..."):
-                related_news = fetch_related_news(result['searchKeywords'])
-                
-                if related_news:
-                    for article in related_news:
-                        with st.container():
-                            st.markdown(f"""
-                                <div class="news-card">
-                                    <div style="font-size: 0.8rem; color: #00a8cc; font-weight: bold; text-transform: uppercase;">{article['source']['name'] if isinstance(article['source'], dict) else article['source']}</div>
-                                    <div style="font-size: 1.1rem; font-weight: bold; color: #004a99; margin: 5px 0;">{article['title']}</div>
-                                    <div style="font-size: 0.9rem; color: #666; margin-bottom: 10px;">{article['description'][:200] if article['description'] else 'No description available'}...</div>
-                                    <a href="{article['url']}" target="_blank" style="color: #004a99; text-decoration: none; font-weight: bold;">Read Full Article →</a>
-                                </div>
-                            """, unsafe_allow_html=True)
-                else:
-                    st.info("No related external news found at this time.")
+if keys_ready and st.session_state.get("result"):
+    result = st.session_state.result
+    st.divider()
+    
+    # Importance Score
+    score = result['importanceScore']
+    score_class = "high" if score >= 8 else "med" if score >= 5 else "low"
+    st.markdown(f'<div class="importance-badge {score_class}">Importance Score: {score}/10</div>', unsafe_allow_html=True)
+    
+    # Summary & Highlights
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        st.markdown("### 📝 Executive Summary")
+        st.write(result['summary'])
         
-        st.session_state.analysis_requested = False
+        st.markdown("### 🚀 Market Impact")
+        st.write(result['marketImpact'])
+        
+    with col_b:
+        st.markdown("### ✨ Key Highlights")
+        for highlight in result['keyHighlights']:
+            st.markdown(f"- {highlight}")
+        
+        st.markdown("### 🏗️ Builders & Industries")
+        html_tags = "".join([f'<span class="tag">{esc(tag)}</span>' for tag in result['buildersAndIndustries']])
+        st.markdown(html_tags, unsafe_allow_html=True)
+
+    # Specialized Design & Real Estate Section
+    if 'designAndRealEstateIntel' in result:
+        st.divider()
+        st.markdown("### 🏠 Design & Real Estate Intelligence")
+        
+        d_col1, d_col2, d_col3 = st.columns(3)
+        
+        with d_col1:
+            st.markdown("#### 🎯 Opportunities")
+            for opp in result['designAndRealEstateIntel'].get('opportunities', []):
+                st.markdown(f"- {opp}")
+        
+        with d_col2:
+            st.markdown("#### 📈 Industry Trends")
+            for trend in result['designAndRealEstateIntel'].get('trends', []):
+                st.markdown(f"- {trend}")
+                
+        with d_col3:
+            st.markdown("#### 🏗️ Key Projects")
+            for proj in result['designAndRealEstateIntel'].get('keyProjects', []):
+                st.markdown(f"- {proj}")
+
+    # Related Market Intel
+    st.divider()
+    st.header("🌐 Related Market Intel")
+    st.caption("Latest and relevant news from around the web")
+    
+    with st.spinner("Fetching global market data..."):
+        related_news = fetch_related_news(result['searchKeywords'])
+        
+        if related_news:
+            for article in related_news:
+                with st.container():
+                    st.markdown(f"""
+                        <div class="news-card">
+                            <div style="font-size: 0.8rem; color: #00a8cc; font-weight: bold; text-transform: uppercase;">{esc(article['source'].get('name') if isinstance(article.get('source'), dict) else article.get('source'))}</div>
+                            <div style="font-size: 1.1rem; font-weight: bold; color: #004a99; margin: 5px 0;">{esc(article.get('title'))}</div>
+                            <div style="font-size: 0.9rem; color: #666; margin-bottom: 10px;">{esc((article.get('description') or 'No description available')[:200])}...</div>
+                            <a href="{esc(safe_link(article.get('url')))}" target="_blank" rel="noopener noreferrer" style="color: #004a99; text-decoration: none; font-weight: bold;">Read Full Article →</a>
+                        </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.info("No related external news found at this time.")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### About BizPulse")
 st.sidebar.write("Developed to help you stay ahead of the market by distilling complex newsletters into actionable intelligence.")
-st.sidebar.info("Using Gemini 1.5 Flash & NewsAPI")
+st.sidebar.info("Using Google Gemini & NewsAPI")

@@ -5,7 +5,7 @@
 ## 🌟 Key Features
 
 - **Multi-Source Input**: Paste raw text, enter article URLs, or upload PDF/TXT files.
-- **AI-Powered Analysis**: Uses Google Gemini 1.5 Flash to extract:
+- **AI-Powered Analysis**: Uses Google Gemini (`gemini-flash-latest`) to extract:
   - Importance Score (1-10)
   - Executive Summary & Market Impact
   - Key Highlights & Industry Builders
@@ -17,8 +17,8 @@
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/the-news-analysost.git
-   cd the-news-analysost/streamlit_app
+   git clone https://github.com/SKsiddhant/newsletter-analysis.git
+   cd newsletter-analysis/streamlit_app
    ```
 
 2. **Install Dependencies**:
@@ -41,8 +41,10 @@
 
 ## 🏗️ Project Structure
 - `app.py`: The main unified Streamlit application.
+- `helpers.py`: Pure helper functions (HTML escaping, URL validation, response parsing).
+- `tests/`: `pip install -r requirements-dev.txt && pytest` (offline; Gemini and NewsAPI are faked).
 - `requirements.txt`: Python dependencies.
 - `.env`: (Local only) API key storage.
 
 ## 🛡️ Security
-This project uses `.env` files and Streamlit session state to manage secrets. Never commit your `.env` file to public repositories.
+Model output and NewsAPI fields are HTML-escaped before display, article URLs must resolve to public addresses, and the NewsAPI key is sent in a header. This project uses `.env` files and Streamlit session state to manage secrets. Never commit your `.env` file to public repositories.
